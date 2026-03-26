@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>拍一拍 - 智慧中医导引</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        /* 定义色彩变量 */
+        :root {
+            --highlight: #AEE31B; /* 扫描线与准心颜色 */
+            --theme-bg: #EEFDE0;  /* UI 主色调 */
+            --dark-text: #1B2E0B; /* 深色文字 */
+        }
+
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Segoe UI', 'PingFang SC', sans-serif; color: var(--dark-text); }
+        
+        /* 扫描装饰层 */
+        .hud-overlay { 
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; 
+            border: 10px solid var(--highlight); 
+            box-sizing: border-box;
+            pointer-events: none; z-index: 10; opacity: 0.2; 
+        }
+        
+        /* 扫描线：嫩绿色 */
+        .scan-line { 
+            position: absolute; width: 100%; height: 3px; 
+            background: var(--highlight); 
+            box-shadow: 0 0 20px var(--highlight); 
+            animation: scan 4s linear infinite; z-index: 5; 
+        }
+        @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+
+        /* 顶部标题栏 */
+        .scanner-header { 
+            position: absolute; top: 0; width: 100%; height: 60px; 
+            background: var(--theme-bg); 
+            display: flex; justify-content: center; align-items: center; 
+            z-index: 11; border-bottom: 3px solid var(--highlight); 
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        }
+        .scanner-header h1 { margin: 0; font-size: 24px; letter-spacing: 8px; color: var(--dark-text); font-weight: 900; }
+
+        /* 侧边实时状态 */
+        .side-panel { 
+            position: absolute; left: 15px; top: 80px; width: 140px; 
+            background: rgba(238, 253, 224, 0.85); 
+            border-left: 4px solid var(--highlight); 
+            padding: 10px; font-size: 11px; z-index: 12; border-radius: 0 8px 8px 0;
+        }
+
+        #output_canvas { transform: scaleX(-1); width: 100vw; height: 100vh; object-fit: cover; }
+        #input_video { display: none; }
+
+        /* 增强版信息卡片：主题色背景 */
+        #info-card {
+            position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%);
+            width: 340px; background: var(--theme-bg); 
+            border: 3px solid var(--highlight); 
+            padding: 20px; z-index: 20; display: none; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            border-radius: 20px;
+        }
+        #info-card h3 { margin: 0 0 12px 0; color: var(--dark-text); border-bottom: 2px solid var(--highlight); padding-bottom: 5px; font-size: 20px; }
+        .info-section { margin-bottom: 10px; font-size: 14px; }
+        .info-label { background: var(--highlight); color: #000; padding: 2px 6px; border-radius: 4px; font-weight: bold; margin-right: 8px; font-size: 12px; }
+        .info-text { color: var(--dark-text); line-height: 1.5; font-weight: 500; }
+        
+        .click-hint { position: absolute; top: 70px; width: 100%; text-align: center; color: white; z-index: 10; font-size: 14px; text-shadow: 0 2px 4px #000; }
+    </style>
+</head>
+<body>
+
+<div class="hud-overlay"></div>
+<div class="scan-line"></div>
+<div class="scanner-header">
+    <h1>拍一拍</h1>
+</div>
+<div class="click-hint">点击屏幕上的穴位查看详情</div>
+
+<div class="side-panel">
+    <div>系统：运行中</div>
+    <div>频率：30.0 HZ</div>
+    <div style="color:#6b8e23">经络：感应正常</div>
+    <hr style="border:0.5px solid #AEE31B">
+    <div id="status-text">等待识别...</div>
+</div>
+
+<!-- 信息弹窗 -->
+<div id="info-card">
+    <h3 id="p-name">穴位名称</h3>
+    <div class="info-section">
+        <span class="info-label">定位</span>
+        <span class="info-text" id="p-loc">...</span>
+    </div>
+    <div class="info-section">
+        <span class="info-label">功效</span>
+        <span class="info-text" id="p-eff">...</span>
+    </div>
+    <div style="text-align:center; font-size:10px; color:#6b8e23; margin-top:10px; border-top:1px dashed #AEE31B; padding-top:5px;">智慧中医·健康导引</div>
+</div>
+
+<video id="input_video" playsinline></video>
+<canvas id="output_canvas"></canvas>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    
+    let activeAcupoint = null;
+    let lastResults = null;
+
+    // 穴位数据库
+    const ACUPOINTS = [
+        { type:'face', name: "印堂", index: 9, loc: "两眉正中", eff: "清头明目、安神定惊。主治头痛、失眠、鼻炎。" },
+        { type:'face', name: "神庭", index: 10, loc: "前发际正中直上0.5寸", eff: "宁神醒脑。主治头痛、眩晕、失眠。" },
+        { type:'face', name: "左太阳", index: 251, loc: "眉尾与眼外角间向后1寸", eff: "疏风解表、止痛。主治偏头痛、目赤肿痛。" },
+        { type:'face', name: "右太阳", index: 21, loc: "眉尾与眼外角间向后1寸", eff: "疏风解表、止痛。主治偏头痛、目赤肿痛。" },
+        { type:'face', name: "左攒竹", index: 285, loc: "眉头凹陷处", eff: "祛风明目。主治视物不清、流泪、头痛。" },
+        { type:'face', name: "右攒竹", index: 55, loc: "眉头凹陷处", eff: "祛风明目。主治视物不清、流泪、头痛。" },
+        { type:'face', name: "左迎香", index: 358, loc: "鼻翼外缘旁0.5寸", eff: "通鼻窍、散风热。主治鼻塞、嗅觉减退。" },
+        { type:'face', name: "右迎香", index: 129, loc: "鼻翼外缘旁0.5寸", eff: "通鼻窍、散风热。主治鼻塞、嗅觉减退。" },
+        { type:'face', name: "左颊车", index: 361, loc: "下颌角前上方一横指", eff: "祛风清热。主治牙痛、口眼歪斜。" },
+        { type:'face', name: "右颊车", index: 132, loc: "下颌角前上方一横指", eff: "祛风清热。主治牙痛、口眼歪斜。" },
+        { type:'face', name: "承浆", index: 18, loc: "下唇正中凹陷处", eff: "通络消肿。主治面部肿痛、口歪流涎。" },
+        { type:'pose', name: "膻中", index: 'chest', loc: "胸骨正中，两乳头连线中点", eff: "宽胸理气。主治胸闷、咳嗽、心悸。" },
+        { type:'pose', name: "左曲池", index: 14, loc: "屈肘，肘横纹外侧端", eff: "清热解表、调理血压。主治发热、头晕。" },
+        { type:'pose', name: "右曲池", index: 13, loc: "屈肘，肘横纹外侧端", eff: "清热解表、调理血压。主治发热、头晕。" }
+    ];
+
+    function onResults(results) {
+        lastResults = results;
+        document.getElementById('status-text').innerText = results.faceLandmarks ? "状态：检测到人脸" : "状态：搜索目标...";
+        
+        canvasElement.width = videoElement.videoWidth;
+        canvasElement.height = videoElement.videoHeight;
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        // 绘制嫩绿色扫描网格
+        if (results.faceLandmarks) {
+            drawCyberMesh(results.faceLandmarks);
+            drawPoints(results.faceLandmarks, 'face');
+        }
+        if (results.poseLandmarks) {
+            drawPoints(results.poseLandmarks, 'pose');
+        }
+        canvasCtx.restore();
+    }
+
+    function drawCyberMesh(landmarks) {
+        canvasCtx.beginPath();
+        canvasCtx.strokeStyle = "rgba(174, 227, 27, 0.2)";
+        canvasCtx.lineWidth = 1;
+        // 关键轮廓
+        const o = [10, 332, 284, 251, 389, 356, 454, 323, 361, 288, 378, 152, 136, 93, 234, 127, 162, 21, 54, 103, 67, 10];
+        o.forEach(idx => {
+            const p = landmarks[idx];
+            canvasCtx.lineTo(p.x * canvasElement.width, p.y * canvasElement.height);
+        });
+        canvasCtx.stroke();
+    }
+
+    function drawPoints(landmarks, type) {
+        ACUPOINTS.filter(p => p.type === type).forEach(point => {
+            let x, y;
+            if (point.index === 'chest') {
+                const ls = landmarks[12]; const rs = landmarks[11];
+                if(!ls || !rs) return;
+                x = (ls.x + rs.x) / 2; y = (ls.y + rs.y) / 2 + 0.15;
+            } else {
+                const lm = landmarks[point.index];
+                if (!lm) return;
+                x = lm.x; y = lm.y;
+            }
+
+            const px = x * canvasElement.width;
+            const py = y * canvasElement.height;
+
+            const isAct = activeAcupoint?.name === point.name;
+            
+            // 绘制嫩绿色准心
+            canvasCtx.strokeStyle = isAct ? "#fff" : "#AEE31B";
+            canvasCtx.lineWidth = isAct ? 4 : 2;
+            
+            canvasCtx.beginPath();
+            canvasCtx.arc(px, py, 12, 0, Math.PI * 2);
+            canvasCtx.stroke();
+            
+            // 绘制四个小触角
+            const size = 18;
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(px - size, py); canvasCtx.lineTo(px + size, py);
+            canvasCtx.moveTo(px, py - size); canvasCtx.lineTo(px, py + size);
+            canvasCtx.stroke();
+
+            // 标注文字
+            canvasCtx.save();
+            canvasCtx.translate(px, py);
+            canvasCtx.scale(-1, 1);
+            canvasCtx.fillStyle = isAct ? "#fff" : "#AEE31B";
+            canvasCtx.font = "bold 14px Arial";
+            canvasCtx.shadowColor = "black";
+            canvasCtx.shadowBlur = 4;
+            canvasCtx.fillText(point.name, 20, 5);
+            canvasCtx.restore();
+        });
+    }
+
+    function handleInteraction(e) {
+        if (!lastResults) return;
+        const rect = canvasElement.getBoundingClientRect();
+        const scaleX = canvasElement.width / rect.width;
+        const scaleY = canvasElement.height / rect.height;
+        const clickX = (rect.right - e.clientX) * scaleX;
+        const clickY = (e.clientY - rect.top) * scaleY;
+
+        let found = false;
+        ACUPOINTS.forEach(point => {
+            let lm;
+            if (point.type === 'face') lm = lastResults.faceLandmarks?.[point.index];
+            else if (point.index === 'chest') {
+                const ls = lastResults.poseLandmarks?.[12]; const rs = lastResults.poseLandmarks?.[11];
+                if(ls && rs) lm = {x:(ls.x+rs.x)/2, y:(ls.y+rs.y)/2+0.15};
+            }
+            else lm = lastResults.poseLandmarks?.[point.index];
+
+            if (lm) {
+                const d = Math.sqrt((clickX - lm.x * canvasElement.width)**2 + (clickY - lm.y * canvasElement.height)**2);
+                if (d < 60) {
+                    activeAcupoint = point;
+                    updateInfoCard(point);
+                    found = true;
+                }
+            }
+        });
+        if (!found) {
+            activeAcupoint = null;
+            document.getElementById('info-card').style.display = 'none';
+        }
+    }
+
+    function updateInfoCard(p) {
+        const card = document.getElementById('info-card');
+        document.getElementById('p-name').innerText = p.name;
+        document.getElementById('p-loc').innerText = p.loc;
+        document.getElementById('p-eff').innerText = p.eff;
+        card.style.display = 'block';
+    }
+
+    canvasElement.addEventListener('mousedown', handleInteraction);
+    canvasElement.addEventListener('touchstart', (e) => { e.preventDefault(); handleInteraction(e.touches[0]); });
+
+    const holistic = new Holistic({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+    });
+    holistic.setOptions({ modelComplexity: 1, minDetectionConfidence: 0.5 });
+    holistic.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await holistic.send({image: videoElement}); },
+        width: 1280, height: 720
+    });
+    camera.start();
+</script>
+</body>
+</html>
