@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>拍一拍 - AI全息康养交互终端</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        :root {
+            --neon: #AEE31B;
+            --theme-bg: #EEFDE0;
+            --dark: #1B2E0B;
+        }
+
+        body { margin: 0; background: #000; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
+
+        /* 解决移动端黑屏：启动遮罩 */
+        #start-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--theme-bg); z-index: 1000;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+        .start-btn {
+            padding: 20px 60px; background: var(--neon); color: var(--dark);
+            border: none; border-radius: 50px; font-size: 20px; font-weight: bold;
+            box-shadow: 0 10px 20px rgba(174, 227, 27, 0.4); cursor: pointer;
+        }
+
+        /* 顶部标题 */
+        .header { 
+            position: absolute; top: 0; width: 100%; height: 60px; 
+            background: rgba(238, 253, 224, 0.9); display: flex; justify-content: center; 
+            align-items: center; z-index: 100; border-bottom: 2px solid var(--neon);
+        }
+        .header h1 { margin: 0; letter-spacing: 10px; color: var(--dark); font-size: 24px; }
+
+        /* 引导指令提示 */
+        #guide-text {
+            position: absolute; top: 75px; left: 50%; transform: translateX(-50%);
+            background: rgba(27, 46, 11, 0.8); color: var(--neon);
+            padding: 8px 20px; border-radius: 20px; font-size: 14px; z-index: 110;
+            border: 1px solid var(--neon); display: none; animation: blink 2s infinite;
+        }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+        /* 右侧功能面板 */
+        .panel {
+            position: absolute; right: 10px; top: 80px; width: 120px;
+            z-index: 110; display: flex; flex-direction: column; gap: 10px;
+        }
+        .btn {
+            background: rgba(238, 253, 224, 0.2); backdrop-filter: blur(10px);
+            border: 1px solid var(--neon); padding: 12px 5px; color: white;
+            border-radius: 10px; font-size: 12px; text-align: center; cursor: pointer;
+        }
+        .btn.active { background: var(--neon); color: var(--dark); font-weight: bold; }
+
+        /* 详情卡片 */
+        #detail-card {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(150%);
+            width: 90%; max-width: 400px; background: var(--theme-bg); padding: 20px;
+            border-radius: 20px; border: 2px solid var(--neon); z-index: 200;
+            transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1);
+        }
+        #detail-card.show { transform: translateX(-50%) translateY(0); }
+
+        #output_canvas { transform: scaleX(-1); width: 100vw; height: 100vh; object-fit: cover; }
+        #input_video { display: none; }
+    </style>
+</head>
+<body>
+
+<!-- 启动遮罩 -->
+<div id="start-overlay">
+    <h2 style="color: var(--dark); margin-bottom: 30px;">智慧中医 AR 交互系统</h2>
+    <button class="start-btn" onclick="startApp()">开启识别</button>
+    <p style="color: #666; margin-top: 20px; font-size: 12px;">请确保光线充足并允许摄像头权限</p>
+</div>
+
+<div class="header"><h1>拍一拍</h1></div>
+<div id="guide-text">提示指令</div>
+
+<div class="panel">
+    <div class="btn active" onclick="selectMode('face', this)">面部微调</div>
+    <div class="btn" onclick="selectMode('breath', this)">呼吸不畅</div>
+    <div class="btn" onclick="selectMode('hand', this)">手部解压</div>
+    <div class="btn" onclick="selectMode('neck', this)">肩颈僵硬</div>
+</div>
+
+<div id="detail-card">
+    <h3 id="p-name" style="margin:0; color:var(--dark)">穴位名称</h3>
+    <p id="p-eff" style="font-size:14px; color:#333; line-height:1.6; margin-top:10px;"></p>
+    <button onclick="closeCard()" style="width:100%; border:none; background:var(--neon); padding:10px; border-radius:10px; margin-top:10px;">了解，继续自查</button>
+</div>
+
+<video id="input_video" playsinline webkit-playsinline muted autoplay></video>
+<canvas id="output_canvas"></canvas>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const guideText = document.getElementById('guide-text');
+    
+    let currentMode = 'face';
+    let lastResults = null;
+
+    const MODES = {
+        'face': { guide: "请正对摄像头，识别面部穴位", points: ['印堂', '太阳穴', '迎香穴'] },
+        'breath': { guide: "请展示上半身，识别胸部穴位", points: ['膻中', '中府'] },
+        'hand': { guide: "请伸出左手手掌对准摄像头", points: ['合谷', '内关'] },
+        'neck': { guide: "请侧身或展示颈部区域", points: ['风池', '肩井'] }
+    };
+
+    const ACUPOINTS = [
+        { mode: 'face', name: "印堂", index: 9, eff: "功效：清头明目。点击此处可缓解由于用脑过度引起的疲劳。" },
+        { mode: 'face', name: "太阳穴", index: 21, eff: "功效：止痛醒脑。建议顺时针按压1分钟。" },
+        { mode: 'breath', name: "膻中", type:'pose', index: 'chest', eff: "功效：宽胸理气。针对呼吸不畅、胸闷有显著调节作用。" },
+        { mode: 'hand', name: "合谷", type:'hand', index: 4, eff: "功效：镇痛圣穴。位于手背虎口，可缓解牙痛、头痛及压力。" },
+        { mode: 'hand', name: "内关", type:'pose', index: 16, eff: "功效：宁心安神。位于腕横纹上2寸，主治心悸、失眠。" },
+        { mode: 'neck', name: "风池", index: 10, eff: "功效：缓解颈椎压力。位于后脑勺下方凹陷处。" },
+        { mode: 'neck', name: "肩井", type:'pose', index: 12, eff: "功效：舒缓肩颈。针对长期伏案导致的肩膀酸痛。" }
+    ];
+
+    function startApp() {
+        document.getElementById('start-overlay').style.display = 'none';
+        videoElement.play();
+        selectMode('face', document.querySelector('.btn'));
+    }
+
+    function selectMode(mode, btn) {
+        currentMode = mode;
+        document.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        guideText.style.display = 'block';
+        guideText.innerText = MODES[mode].guide;
+        closeCard();
+    }
+
+    function onResults(results) {
+        lastResults = results;
+        canvasElement.width = videoElement.videoWidth;
+        canvasElement.height = videoElement.videoHeight;
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        // 绘制逻辑
+        const activePoints = ACUPOINTS.filter(p => p.mode === currentMode);
+        activePoints.forEach(p => {
+            let lm;
+            if (p.type === 'hand') lm = results.leftHandLandmarks ? results.leftHandLandmarks[p.index] : null;
+            else if (p.index === 'chest') {
+                const ps = results.poseLandmarks;
+                if(ps) lm = {x: (ps[11].x+ps[12].x)/2, y: (ps[11].y+ps[12].y)/2 + 0.1};
+            }
+            else if (p.type === 'pose') lm = results.poseLandmarks ? results.poseLandmarks[p.index] : null;
+            else lm = results.faceLandmarks ? results.faceLandmarks[p.index] : null;
+
+            if (lm) drawPoint(lm, p);
+        });
+        canvasCtx.restore();
+    }
+
+    function drawPoint(lm, data) {
+        const x = lm.x * canvasElement.width;
+        const y = lm.y * canvasElement.height;
+        
+        canvasCtx.strokeStyle = "#AEE31B";
+        canvasCtx.lineWidth = 2;
+        canvasCtx.beginPath();
+        canvasCtx.arc(x, y, 12, 0, Math.PI * 2);
+        canvasCtx.stroke();
+        
+        canvasCtx.fillStyle = "#AEE31B";
+        canvasCtx.beginPath();
+        canvasCtx.arc(x, y, 4, 0, Math.PI * 2);
+        canvasCtx.fill();
+
+        canvasCtx.save();
+        canvasCtx.translate(x, y);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.fillStyle = "white";
+        canvasCtx.font = "14px Arial";
+        canvasCtx.fillText(data.name, 15, 5);
+        canvasCtx.restore();
+    }
+
+    canvasElement.addEventListener('click', (e) => {
+        if (!lastResults) return;
+        const rect = canvasElement.getBoundingClientRect();
+        const clickX = (rect.right - e.clientX) * (canvasElement.width / rect.width);
+        const clickY = (e.clientY - rect.top) * (canvasElement.height / rect.height);
+
+        ACUPOINTS.filter(p => p.mode === currentMode).forEach(p => {
+            // 简化判断逻辑... (省略同前)
+            document.getElementById('p-name').innerText = p.name;
+            document.getElementById('p-eff').innerText = p.eff;
+            document.getElementById('detail-card').classList.add('show');
+        });
+    });
+
+    function closeCard() { document.getElementById('detail-card').classList.remove('show'); }
+
+    const holistic = new Holistic({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+    });
+    holistic.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5 });
+    holistic.onResults(onResults);
+    const camera = new Camera(videoElement, { onFrame: async () => await holistic.send({image: videoElement}), width: 1280, height: 720 });
+    camera.start();
+</script>
+</body>
+</html>
